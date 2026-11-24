@@ -215,17 +215,27 @@ function isEscapable(ch) {
   return ESCAPABLE.has(ch);
 }
 
+// Whether the character at j in s is escaped: an odd run of backslashes
+// immediately before it. A backslash escapes the next character only when
+// that character is escapable, and the targets here (` * ]) are escapable,
+// so the parity of the run decides it. The common case (no preceding
+// backslash) is a single charCodeAt.
+function isEscapedAt(s, j) {
+  if (j === 0 || s.charCodeAt(j - 1) !== 92) return false; // not '\\'
+  let count = 1;
+  let k = j - 2;
+  while (k >= 0 && s.charCodeAt(k) === 92) { count++; k--; }
+  return (count & 1) === 1;
+}
+
 // Find the next unescaped backtick at an index >= from. -1 when there is
 // none. (The caller guarantees the character at from - 1 is not a backtick,
 // so a span found here always has at least one character between its fences.)
 function findCodeClose(s, from) {
-  const n = s.length;
-  let j = from;
-  while (j < n) {
-    const c = s[j];
-    if (c === '\\' && j + 1 < n && isEscapable(s[j + 1])) { j += 2; continue; }
-    if (c === '`') return j;
-    j++;
+  let j = s.indexOf('`', from);
+  while (j !== -1) {
+    if (!isEscapedAt(s, j)) return j;
+    j = s.indexOf('`', j + 1);
   }
   return -1;
 }
@@ -233,17 +243,13 @@ function findCodeClose(s, from) {
 // Find the next unescaped '**' with at least one character after `from`.
 // -1 when there is none.
 function findStrongClose(s, from) {
-  const n = s.length;
-  let j = from;
-  while (j + 1 < n) {
-    const c = s[j];
-    if (c === '\\' && j + 1 < n && isEscapable(s[j + 1])) { j += 2; continue; }
-    if (c === '*' && s[j + 1] === '*') {
-      if (j > from) return j;
-      j += 2;
-      continue;
-    }
-    j++;
+  let j = s.indexOf('**', from);
+  while (j !== -1) {
+    // An escaped first star is skipped alone: the second star may pair
+    // with the next character. An empty pair (j === from) is skipped whole.
+    if (isEscapedAt(s, j)) { j = s.indexOf('**', j + 1); continue; }
+    if (j > from) return j;
+    j = s.indexOf('**', j + 2);
   }
   return -1;
 }
@@ -255,18 +261,14 @@ function findStrongClose(s, from) {
 // final star, while the '**' of '**turn**' does not close one at all.)
 // -1 when there is none.
 function findEmClose(s, from) {
-  const n = s.length;
-  let j = from;
-  while (j < n) {
-    const c = s[j];
-    if (c === '\\' && j + 1 < n && isEscapable(s[j + 1])) { j += 2; continue; }
-    if (c === '*') {
-      if (s[j + 1] === '*') { j += 2; continue; }
-      if (j > from) return j;
-      j++;
-      continue;
-    }
-    j++;
+  let j = s.indexOf('*', from);
+  while (j !== -1) {
+    // An escaped star is skipped alone: it may be the first of a pair
+    // whose second star is a closer. A '**' pair is never an em closer.
+    if (isEscapedAt(s, j)) { j = s.indexOf('*', j + 1); continue; }
+    if (s.charCodeAt(j + 1) === 42) { j = s.indexOf('*', j + 2); continue; }
+    if (j > from) return j;
+    j = s.indexOf('*', j + 1);
   }
   return -1;
 }
