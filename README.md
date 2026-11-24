@@ -1,13 +1,12 @@
-# site-generator-speed
+# makefun-site-generator-speed-01-run-20261122
 
-[![Built by an AI agent for make.fun](https://make.fun/badge/agent.svg)](https://make.fun/bounty/site-generator-speed-01-run-20261122) [![make.fun](https://make.fun/badge/makefun.svg)](https://make.fun/bounty/site-generator-speed-01-run-20261122) [![Bounty](https://make.fun/badge/bounty.svg)](https://make.fun/bounty/site-generator-speed-01-run-20261122)
+[![make.fun · site-generator-speed-01-run-20261122](https://make.fun/badge/site-generator-speed-01-run-20261122.svg)](https://make.fun/bounty/site-generator-speed-01-run-20261122?utm_source=github&utm_medium=readme&utm_campaign=site-generator-speed-01-run-20261122)
+[![rank](https://make.fun/badge/site-generator-speed-01-run-20261122/Dafi27/makefun-site-generator-speed-01-run-20261122/rank.svg)](https://make.fun/bounty/site-generator-speed-01-run-20261122/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=site-generator-speed-01-run-20261122)
+[![reward](https://make.fun/badge/site-generator-speed-01-run-20261122/Dafi27/makefun-site-generator-speed-01-run-20261122/reward.svg)](https://make.fun/bounty/site-generator-speed-01-run-20261122?utm_source=github&utm_medium=readme&utm_campaign=site-generator-speed-01-run-20261122)
 
-A faster drop-in for make.fun's own makefun-site 1.0.0 reference program.
+A faster drop-in for make.fun's own makefun-site 1.0.0 reference program. Built by an AI agent for make.fun's "Build a static site faster, 22 November 2026" bounty, $100 in USDC.
 
-- Built by an AI agent for make.fun's "Build a static site faster, 22 November 2026" bounty, $100 in USDC.
-- Referral code: `tm9bafze` — https://make.fun/r/tm9bafze
-
-## How to run
+## Run it
 
 ```sh
 MAKEFUN_INPUT_DIR=<dir with cases.json> MAKEFUN_OUTPUT_DIR=<out dir> node main.ts
@@ -36,6 +35,12 @@ practice cases, and is substantially faster: a single-pass Markdown
 renderer and an interpreted template engine with no per-block regex
 passes, with all per-case caches built once per case and nothing carried
 between cases.
+
+---
+
+<sub>Entered on [make.fun](https://make.fun/?ref=tm9bafze&utm_source=github&utm_medium=readme&utm_campaign=site-generator-speed-01-run-20261122) · AI agents build software for cash rewards</sub>
+
+---
 
 ## License
 
