@@ -16,7 +16,11 @@
 const ESC_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const ESC_RE = /[&<>"']/g;
 
+// Escape HTML. The indexOf guard returns the string untouched (no copy)
+// when it holds no escapable character, which is the common case.
 function esc(s) {
+  if (s.indexOf('&') === -1 && s.indexOf('<') === -1 && s.indexOf('>') === -1 &&
+      s.indexOf('"') === -1 && s.indexOf("'") === -1) return s;
   return s.replace(ESC_RE, (ch) => ESC_MAP[ch]);
 }
 
@@ -270,105 +274,103 @@ function findEmClose(s, from) {
 // Inline rendering. `ctx` carries the link resolver:
 //   ctx.resolveLink(target) -> href string, or null when the link is broken
 //   ctx.broken(target)      -> records a broken link (deduplicated by caller)
+//
+// The scan jumps from one special character to the next with a regex (native
+// speed) instead of walking plain text character by character. The regex is
+// shared; every inlineHTML call resets its lastIndex at entry and sets it
+// explicitly after any recursive call, so recursion is safe.
+const INLINE_SPECIAL_RE = /[\\`*[]/g;
+
 function inlineHTML(s, ctx) {
   let out = '';
-  let i = 0;
-  const n = s.length;
   let cs = 0; // start of the current plain-text chunk
-  const flush = (to) => { if (to > cs) out += esc(s.slice(cs, to)); };
-  while (i < n) {
-    const c = s[i];
-    if (c === '\\' && i + 1 < n && isEscapable(s[i + 1])) {
-      flush(i);
-      out += s[i + 1];
-      i += 2;
-      cs = i;
+  INLINE_SPECIAL_RE.lastIndex = 0;
+  let m;
+  while ((m = INLINE_SPECIAL_RE.exec(s)) !== null) {
+    const j = m.index;
+    const c = m[0];
+    if (c === '\\') {
+      if (j + 1 < s.length && isEscapable(s[j + 1])) {
+        out += esc(s.slice(cs, j)) + s[j + 1];
+        INLINE_SPECIAL_RE.lastIndex = j + 2;
+        cs = j + 2;
+      }
+      // Otherwise the backslash is itself: it stays in the chunk, and the
+      // scan continues after it (lastIndex is already j + 1).
       continue;
     }
     if (c === '`') {
       // A backtick opens a code span only when the next character is not
       // another backtick (a pair of adjacent backticks is literal text; the
       // second one may open a span of its own).
-      if (s[i + 1] === '`') {
-        i++;
-        continue;
+      if (s[j + 1] === '`') continue;
+      const k = findCodeClose(s, j + 1);
+      if (k !== -1) {
+        out += esc(s.slice(cs, j)) + '<code>' + esc(s.slice(j + 1, k)) + '</code>';
+        INLINE_SPECIAL_RE.lastIndex = k + 1;
+        cs = k + 1;
       }
-      const j = findCodeClose(s, i + 1);
-      if (j !== -1) {
-        flush(i);
-        out += '<code>' + esc(s.slice(i + 1, j)) + '</code>';
-        i = j + 1;
-        cs = i;
-        continue;
-      }
-      i++;
-      continue;
-    }
-    if (c === '*' && s[i + 1] === '*') {
-      // A '**' opens strong only when it is not immediately followed by
-      // another '**' (a run of four or more stars: the first pair is
-      // literal, the next pair is judged on its own).
-      if (s[i + 2] === '*' && s[i + 3] === '*') {
-        i += 2;
-        continue;
-      }
-      const j = findStrongClose(s, i + 2);
-      if (j !== -1) {
-        flush(i);
-        out += '<strong>' + inlineHTML(s.slice(i + 2, j), ctx) + '</strong>';
-        i = j + 2;
-        cs = i;
-        continue;
-      }
-      i += 2;
       continue;
     }
     if (c === '*') {
-      const j = findEmClose(s, i + 1);
-      if (j !== -1) {
-        flush(i);
-        out += '<em>' + inlineHTML(s.slice(i + 1, j), ctx) + '</em>';
-        i = j + 1;
-        cs = i;
+      if (s[j + 1] === '*') {
+        // A '**' opens strong only when it is not immediately followed by
+        // another '**' (a run of four or more stars: the first pair is
+        // literal, the next pair is judged on its own).
+        if (s[j + 2] === '*' && s[j + 3] === '*') {
+          INLINE_SPECIAL_RE.lastIndex = j + 2;
+          continue;
+        }
+        const k = findStrongClose(s, j + 2);
+        if (k !== -1) {
+          const inner = inlineHTML(s.slice(j + 2, k), ctx);
+          out += esc(s.slice(cs, j)) + '<strong>' + inner + '</strong>';
+          INLINE_SPECIAL_RE.lastIndex = k + 2;
+          cs = k + 2;
+        } else {
+          INLINE_SPECIAL_RE.lastIndex = j + 2;
+        }
         continue;
       }
-      i++;
+      const k = findEmClose(s, j + 1);
+      if (k !== -1) {
+        const inner = inlineHTML(s.slice(j + 1, k), ctx);
+        out += esc(s.slice(cs, j)) + '<em>' + inner + '</em>';
+        INLINE_SPECIAL_RE.lastIndex = k + 1;
+        cs = k + 1;
+      }
       continue;
     }
-    if (c === '[') {
-      // [text](target): first unescaped ']' closes the text, '(' must follow
-      // at once, the next ')' closes the target; the target must not be
-      // empty or hold whitespace.
-      let j = i + 1;
-      let close = -1;
-      while (j < n) {
-        if (s[j] === '\\' && j + 1 < n && isEscapable(s[j + 1])) { j += 2; continue; }
-        if (s[j] === ']') { close = j; break; }
-        j++;
-      }
-      if (close !== -1 && s[close + 1] === '(') {
-        let k = close + 2;
-        while (k < n && s[k] !== ')') k++;
-        if (k < n) {
-          const target = s.slice(close + 2, k);
-          if (target !== '' && !/[\s]/.test(target)) {
-            const text = inlineHTML(s.slice(i + 1, close), ctx);
-            const href = ctx.resolveLink(target);
-            if (href === null) ctx.broken(target);
-            flush(i);
-            out += '<a href="' + esc(href === null ? target : href) + '">' + text + '</a>';
-            i = k + 1;
-            cs = i;
-            continue;
-          }
+    // '[': [text](target). The first ']' not escaped closes the text, '('
+    // must follow at once, the next ')' closes the target; the target must
+    // not be empty or hold whitespace.
+    let close = -1;
+    let p = j + 1;
+    const n = s.length;
+    while (p < n) {
+      if (s[p] === '\\' && p + 1 < n && isEscapable(s[p + 1])) { p += 2; continue; }
+      if (s[p] === ']') { close = p; break; }
+      p++;
+    }
+    if (close !== -1 && s[close + 1] === '(') {
+      let k = close + 2;
+      while (k < n && s[k] !== ')') k++;
+      if (k < n) {
+        const target = s.slice(close + 2, k);
+        if (target !== '' && !/[\s]/.test(target)) {
+          const text = inlineHTML(s.slice(j + 1, close), ctx);
+          const href = ctx.resolveLink(target);
+          if (href === null) ctx.broken(target);
+          out += esc(s.slice(cs, j)) + '<a href="' + esc(href === null ? target : href) + '">' + text + '</a>';
+          INLINE_SPECIAL_RE.lastIndex = k + 1;
+          cs = k + 1;
+          continue;
         }
       }
-      i++;
-      continue;
     }
-    i++;
+    // Not a link: the '[' is itself. The scan continues after it.
   }
-  flush(n);
+  out += esc(s.slice(cs));
   return out;
 }
 
@@ -380,13 +382,93 @@ function isBlankLine(l) {
   return true;
 }
 
-const FENCE_RE = /^```([A-Za-z0-9_+\-]*)[ \t]*$/;
-const FENCE_CLOSE_RE = /^```[ \t]*$/;
-const HEADING_RE = /^(#{1,6})[ \t]+(.*)$/;
-const HR_RE = /^(---|\*\*\*)[ \t]*$/;
-const BULLET_RE = /^[-*] /;
-const ORDERED_RE = /^(\d+)\. /;
-const CONTINUATION_RE = /^ {2,}\S/;
+// A fence opener: three backticks, an optional language (A-Z, a-z, 0-9,
+// '_', '+', '-'), then spaces/tabs only. Returns the language, or null.
+function fenceLang(line) {
+  if (line.charCodeAt(0) !== 96 || line.charCodeAt(1) !== 96 || line.charCodeAt(2) !== 96) return null;
+  let i = 3;
+  const n = line.length;
+  let langEnd = 3;
+  while (i < n) {
+    const c = line.charCodeAt(i);
+    if ((c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c === 95 || c === 43 || c === 45) {
+      i++;
+      langEnd = i;
+      continue;
+    }
+    break;
+  }
+  while (i < n) {
+    const c = line.charCodeAt(i);
+    if (c !== 32 && c !== 9) return null;
+    i++;
+  }
+  return line.slice(3, langEnd);
+}
+
+// A fence closer: three backticks, then spaces/tabs only.
+function isFenceClose(line) {
+  if (line.charCodeAt(0) !== 96 || line.charCodeAt(1) !== 96 || line.charCodeAt(2) !== 96) return false;
+  for (let i = 3; i < line.length; i++) {
+    const c = line.charCodeAt(i);
+    if (c !== 32 && c !== 9) return false;
+  }
+  return true;
+}
+
+// A heading: 1-6 '#', at least one space/tab, then text (trailing
+// spaces/tabs dropped). Returns { level, text }, or null when the line is
+// not a heading (no text after the '#'s, or 7+ '#', or no space after).
+function headingInfo(line) {
+  let i = 0;
+  while (line.charCodeAt(i) === 35) i++;
+  if (i === 0 || i > 6) return null;
+  if (i >= line.length) return null;
+  const c = line.charCodeAt(i);
+  if (c !== 32 && c !== 9) return null;
+  let text = line.slice(i + 1).replace(/[ \t]+$/, '');
+  if (text === '') return null;
+  return { level: i, text };
+}
+
+// A thematic break: '---' or '***', then spaces/tabs only.
+function isHr(line) {
+  if (line.length < 3) return false;
+  const c0 = line.charCodeAt(0);
+  if (c0 !== 45 && c0 !== 42) return false;
+  if (line.charCodeAt(1) !== c0 || line.charCodeAt(2) !== c0) return false;
+  for (let i = 3; i < line.length; i++) {
+    const c = line.charCodeAt(i);
+    if (c !== 32 && c !== 9) return false;
+  }
+  return true;
+}
+
+// A list marker: '- ' / '* ' (bullet) or digits + '. ' (ordered).
+// Returns { ordered, startNum, markerLen }, or null.
+function listInfo(line) {
+  const c0 = line.charCodeAt(0);
+  if ((c0 === 45 || c0 === 42) && line.charCodeAt(1) === 32) {
+    return { ordered: false, startNum: 0, markerLen: 2 };
+  }
+  if (c0 >= 48 && c0 <= 57) {
+    let i = 0;
+    while (line.charCodeAt(i) >= 48 && line.charCodeAt(i) <= 57) i++;
+    if (line.charCodeAt(i) === 46 && line.charCodeAt(i + 1) === 32) {
+      return { ordered: true, startNum: parseInt(line.slice(0, i), 10), markerLen: i + 2 };
+    }
+  }
+  return null;
+}
+
+// A list continuation line: two or more spaces, then a non-space.
+function isContinuation(line) {
+  let i = 0;
+  while (line.charCodeAt(i) === 32) i++;
+  if (i < 2 || i >= line.length) return false;
+  const c = line.charCodeAt(i);
+  return c !== 32 && c !== 9;
+}
 
 // Render a body's Markdown. Returns { html, toc, excerpt }.
 // `ctx` is the inline context (link resolution + broken-link reporting).
@@ -404,12 +486,11 @@ function renderMarkdown(body, ctx, slugCache, headingSlugs) {
     if (isBlankLine(line)) { i++; continue; }
 
     // Fence: three backticks + optional language, then spaces/tabs only.
-    const fm = FENCE_RE.exec(line);
-    if (fm) {
-      const lang = fm[1];
+    const lang = fenceLang(line);
+    if (lang !== null) {
       i++;
       const buf = [];
-      while (i < n && !FENCE_CLOSE_RE.test(lines[i])) {
+      while (i < n && !isFenceClose(lines[i])) {
         buf.push(esc(lines[i]) + '\n');
         i++;
       }
@@ -420,27 +501,24 @@ function renderMarkdown(body, ctx, slugCache, headingSlugs) {
     }
 
     // Heading: 1-6 '#', at least one space/tab, then text.
-    const hm = HEADING_RE.exec(line);
+    const hm = headingInfo(line);
     if (hm) {
-      const text = hm[2].replace(/[ \t]+$/, '');
-      if (text !== '') {
-        const level = hm[1].length;
-        const base = slugify(text, slugCache);
-        let id = base;
-        let k = 2;
-        while (headingSlugs.has(id)) { id = base + '-' + k; k++; }
-        headingSlugs.set(id, true);
-        const inner = inlineHTML(text, ctx);
-        if (level === 2 || level === 3) toc.push({ level, id, html: inner });
-        out.push('<h' + level + ' id="' + id + '">' + inner + '</h' + level + '>\n');
-        i++;
-        continue;
-      }
-      // No text after the '#'s: not a heading, fall through to a paragraph.
+      const level = hm.level;
+      const text = hm.text;
+      const base = slugify(text, slugCache);
+      let id = base;
+      let k = 2;
+      while (headingSlugs.has(id)) { id = base + '-' + k; k++; }
+      headingSlugs.set(id, true);
+      const inner = inlineHTML(text, ctx);
+      if (level === 2 || level === 3) toc.push({ level, id, html: inner });
+      out.push('<h' + level + ' id="' + id + '">' + inner + '</h' + level + '>\n');
+      i++;
+      continue;
     }
 
     // Thematic break.
-    if (HR_RE.test(line)) {
+    if (isHr(line)) {
       out.push('<hr>\n');
       i++;
       continue;
@@ -465,21 +543,20 @@ function renderMarkdown(body, ctx, slugCache, headingSlugs) {
     }
 
     // List: bullet '- ' / '* ', or ordered 'digits. '.
-    const bm = BULLET_RE.exec(line);
-    const om = bm ? null : ORDERED_RE.exec(line);
-    if (bm || om) {
-      const ordered = !!om;
-      const startNum = ordered ? parseInt(om[1], 10) : 0;
+    const li = listInfo(line);
+    if (li) {
+      const ordered = li.ordered;
+      const startNum = li.startNum;
       const items = [];
       while (i < n) {
         const l = lines[i];
-        const m2 = ordered ? ORDERED_RE.exec(l) : BULLET_RE.exec(l);
-        if (m2) {
-          items.push(l.slice(m2[0].length));
+        const m2 = listInfo(l);
+        if (m2 && m2.ordered === ordered) {
+          items.push(l.slice(m2.markerLen));
           i++;
           continue;
         }
-        if (CONTINUATION_RE.test(l) && items.length) {
+        if (isContinuation(l) && items.length) {
           items[items.length - 1] += '\n' + l.trim();
           i++;
           continue;
@@ -505,10 +582,9 @@ function renderMarkdown(body, ctx, slugCache, headingSlugs) {
     while (i < n) {
       const l = lines[i];
       if (isBlankLine(l)) break;
-      if (FENCE_RE.test(l)) break;
-      const hm2 = HEADING_RE.exec(l);
-      if (hm2 && hm2[2].replace(/[ \t]+$/, '') !== '') break;
-      if (HR_RE.test(l)) break;
+      if (fenceLang(l) !== null) break;
+      if (headingInfo(l)) break;
+      if (isHr(l)) break;
       parts.push(l.trim());
       i++;
     }
@@ -713,6 +789,19 @@ function writeValue(v) {
 // Resolve a path's first name: from the innermost loop that binds it
 // (`loop` before the element variable), else from the page's values. Each
 // next name is an own property of the value so far, or the path is undefined.
+//
+// The context objects (root, loop variables, cards, tags) are built with a
+// null prototype, so the first name can be read with a plain property
+// lookup: no inherited property can shadow it, and a bound name is never
+// undefined. Later names still use hasOwn, because a value there can be a
+// string or an array, whose inherited members must not resolve.
+// A fresh object with a null prototype holding o's own properties. Used
+// for the template root scope, so resolvePath's plain property lookup for
+// the first name cannot trip over an inherited member.
+function nullObj(o) {
+  return Object.assign(Object.create(null), o);
+}
+
 function resolvePath(path, frames) {
   const first = path[0];
   let v;
@@ -724,12 +813,12 @@ function resolvePath(path, frames) {
       found = true;
       break;
     }
-    if (fr.vars && Object.hasOwn(fr.vars, first)) {
+    if (fr.vars && fr.vars[first] !== undefined) {
       v = fr.vars[first];
       found = true;
       break;
     }
-    if (fr.root && Object.hasOwn(fr.root, first)) {
+    if (fr.root && fr.root[first] !== undefined) {
       v = fr.root[first];
       found = true;
       break;
@@ -764,7 +853,7 @@ function renderNodes(nodes, frames, out, templates, depth) {
       if (Array.isArray(v)) {
         for (let k = 0; k < v.length; k++) {
           frames.push({
-            vars: { [node.varName]: v[k] },
+            vars: Object.assign(Object.create(null), { [node.varName]: v[k] }),
             loop: { index: k + 1, first: k === 0, last: k === v.length - 1, length: v.length },
           });
           renderNodes(node.body, frames, out, templates, depth);
@@ -1049,7 +1138,7 @@ function run(input) {
     const layout = src.fm.layout || (src.isPost ? 'post' : 'page');
     const nodes = templates[layout];
     const out = [];
-    renderNodes(nodes, [{ root: { site: siteCtx, tags: tagsCtx, recent: recentCtx, page: src.pageCtx } }], out, templates, 0);
+    renderNodes(nodes, [{ root: nullObj({ site: siteCtx, tags: tagsCtx, recent: recentCtx, page: src.pageCtx }) }], out, templates, 0);
     output[src.outPath] = out.join('');
     if (src.isPost) postCount++; else pageCount++;
   }
@@ -1068,7 +1157,7 @@ function run(input) {
       };
       const out = [];
       renderNodes(templates.index,
-        [{ root: { site: siteCtx, tags: tagsCtx, recent: recentCtx, posts: slice.map(cardOf), pager } }],
+        [{ root: nullObj({ site: siteCtx, tags: tagsCtx, recent: recentCtx, posts: slice.map(cardOf), pager }) }],
         out, templates, 0);
       output[p === 1 ? 'index.html' : 'page/' + p + '/index.html'] = out.join('');
     }
@@ -1082,7 +1171,7 @@ function run(input) {
         posts: tag.posts.map(cardOf) };
       const out = [];
       renderNodes(templates.tag,
-        [{ root: { site: siteCtx, tags: tagsCtx, recent: recentCtx, tag: tagCtx } }],
+        [{ root: nullObj({ site: siteCtx, tags: tagsCtx, recent: recentCtx, tag: tagCtx }) }],
         out, templates, 0);
       output['tags/' + tag.slug + '/index.html'] = out.join('');
     }
@@ -1090,7 +1179,7 @@ function run(input) {
   if (templates.tags) {
     const out = [];
     renderNodes(templates.tags,
-      [{ root: { site: siteCtx, tags: tagsCtx, recent: recentCtx } }],
+      [{ root: nullObj({ site: siteCtx, tags: tagsCtx, recent: recentCtx }) }],
       out, templates, 0);
     output['tags/index.html'] = out.join('');
   }
